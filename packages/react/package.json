@@ -1,6 +1,6 @@
 {
   "name": "framework-agents-react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React hooks for Framework agents (streaming chat over A2A/SSE, multi-turn contexts, live tool activity)",
   "type": "module",
   "main": "./dist/index.js",

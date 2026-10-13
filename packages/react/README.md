@@ -1,46 +1,42 @@
 # framework-agents-react
 
-React hooks for Framework agents. Thin layer over `AgentClient` (`framework-agents`): the same client works headless in TanStack Query loaders/mutations, Next.js route handlers, or plain DOM code.
+React hooks for [`framework-agents`](https://www.npmjs.com/package/framework-agents): turn an agent server's SSE stream into chat state with one hook — live tokens and thinking, tool activity, automatic multi-turn contexts, and awaited results.
 
-## useAgent
+## Install
+
+```bash
+npm install framework-agents-react framework-agents
+```
+
+(react `>=18` peer. Works with Next.js / TanStack Start: mount the repo's `handleAgentRoute` at `app/api/agent/stream/route.ts` and point the hook's `endpoint` at `/api/agent`.)
+
+## Use
 
 ```tsx
 import { useAgent } from "framework-agents-react";
 
 function Chat() {
-  const { turns, thinking, activity, status, error, send, cancel, reset } =
-    useAgent({ endpoint: "/api/agent" }); // or "http://127.0.0.1:8484" direct
+  const { turns, thinking, activity, status, error, contextId, send, cancel, reset } =
+    useAgent({ endpoint: "/api/agent" });
 
   return (
-    <div>
+    <>
       {turns.map((t, i) => <p key={i}><b>{t.role}:</b> {t.text}</p>)}
-      {thinking && <p style={{ opacity: 0.6 }}>{thinking}</p>}
-      {activity.map((a, i) => <small key={i}>{a}</small>)}
-      {status === "streaming" && <button onClick={cancel}>Stop</button>}
-      {error && <p>{error} <button onClick={reset}>Reset</button></p>}
-      <button onClick={() => void send("Hello")}>Send</button>
-    </div>
+      {thinking && <pre className="thinking">{thinking}</pre>}
+      <button onClick={() => send("Explain black holes")} disabled={status === "streaming"}>
+        Ask
+      </button>
+    </>
   );
 }
 ```
 
-## Next.js proxy route (`app/api/agent/route.ts`)
+## What the hook gives you
 
-```ts
-import { AgentClient, handleAgentRoute } from "framework-agents";
-
-const client = new AgentClient(process.env.AGENT_URL!);
-export const POST = (req: Request) => handleAgentRoute(req, client);
-```
-
-## TanStack Query
-
-```ts
-import { useMutation } from "@tanstack/react-query";
-import { AgentClient } from "framework-agents";
-
-const client = new AgentClient("http://127.0.0.1:8484");
-const answer = useMutation({
-  mutationFn: (text: string) => client.send(text).then((r) => r.text),
-});
-```
+- `turns` — user/assistant messages; token deltas append live; a final `done` event reconciles the answer even from providers that only return full text in the terminal frame.
+- `thinking` — reasoning deltas, wiped on each send.
+- `activity` — feed lines (`calling get_weather…`, `get_weather done`) for a live trace pane.
+- `status` — `"idle" | "streaming" | "error"` with last-send-wins semantics (a second send never lets the first clobber it), and errors surfaced in `error`.
+- `contextId` — the server-assigned conversation handle, automatically reused by the next `send()` (multi-turn memory without effort); `reset()` clears it.
+- **`await send(text)` resolves with `{ text, toolCalls, contextId }`** — so submit handlers can await the final answer, react to the tools used, and store the conversation handle wherever they like.
+- Lifecycle guarantees: abort on unmount (the server-side run stops when the client stops), empty assistant turns dropped on abort/error, and no race between overlapping sends.

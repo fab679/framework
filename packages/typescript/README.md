@@ -1,93 +1,67 @@
-# framework-agents (TypeScript)
+# framework-agents
 
-Core of the agentic platform. See `/docs` in the monorepo root for vision, architecture, and roadmap.
+TypeScript agent framework: a ReAct loop with validated tools, streaming, token/cost budgets, a middleware stack with human-in-the-loop, multi-agent orchestration (sequential / parallel / router, DAG workflows, swarms), a typed semantic graph, A2A serving, MCP clients, and a React companion package.
 
-## Layout
+- **Runtime**: Node >= 20. Two production dependencies only (TogetherAI/OpenAI-compatible, Anthropic, and Ollama providers are `fetch`-based — no SDK lock-in).
+- **Docs**: full guides + API reference live in the repo (`docs/` is an MkDocs site; published via GitHub Pages).
+- **Live-tested**: every feature has an offline + gated live test suite hitting the real provider APIs.
 
-```
-src/
-├── index.ts            <- public API (only import from here)
-├── types/              <- shared branded types, result/error envelopes
-├── agent/              <- Agent loop, state, history, sessions, snapshots
-├── state/              <- AgentState (KV) + ToolContext + InvocationState
-├── conversation/       <- Null/SlidingWindow/Summarizing managers
-├── sessions/           <- Storage backends + SessionManager + snapshots
-├── swarm/              <- autonomous handoffs + shared context + safety
-├── a2a/                <- A2A client/server interop
-├── tools/              <- Tool interface + registry + zod validation
-├── memory/             <- Memory interface + in-memory store + compaction.ts
-├── models/             <- ModelProvider + OpenAI-compatible + Anthropic + Ollama + initChatModel
-├── checkpoint/         <- FileCheckpointer + withFileLock (local-first durability)
-├── skills/             <- SKILL.md parse/registry + discover + match
-├── mcp/                <- MCP clients (HTTP/stdio) + tools bridge
-├── prompts/            <- versioned prompt templates + render
-├── structured/         <- responseFormat (tool/provider strategies)
-├── streaming/          <- StreamEvent + collectStream
-├── middleware/         <- hooks + 15 prebuilt (retry/fallback/limits/HITL/PII/summary/todos/fs/subagents…)
-├── semantic/           <- GraphStore + InMemoryGraphStore (entailment in P0-sem/P1-sem)
-├── orchestration/      <- sequential / parallel / router multi-agent
-├── runtime/            <- run with timeout / cancellation / budgets
-├── workflows/          <- DAG workflows (topo levels, retry)
-├── observability/      <- event emitter + logger hooks
-└── utils/              <- abort, retry, tokens helpers
-```
-
-## Scripts
+## Install
 
 ```bash
-pnpm build
-pnpm test
-pnpm lint
-pnpm typecheck
+npm install framework-agents
 ```
 
-## Serve (`framework.json` + CLI)
+Needs an OpenAI-compatible endpoint, Anthropic, or a local Ollama — configured via env keys (`TOGETHER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_*`) or passed inline.
 
-```bash
-pnpm build
-./dist/cli.js validate -c ../../framework.json
-./dist/cli.js dev -c ../../framework.json --port 8484
-```
-
-```json
-{
-  "server": { "host": "127.0.0.1", "basePort": 8484 },
-  "envFile": "./.env",
-  "env": { "FRAMEWORK_ENV": "production" },
-  "checkpointer": { "dir": "./checkpoints" },
-  "http": { "corsOrigins": ["http://localhost:3000"] },
-  "agents": [
-    { "name": "helper", "model": "together:Qwen/Qwen3.5-9B", "skills": ["./skills"] },
-    { "file": "./agents/local.json", "port": 8485 }
-  ]
-}
-```
-
-Agent entries are inline or `{ "file": "./agents/x.json" }` (+ inline overrides).
-Relative paths in agent files resolve against their own dir; overrides against
-`framework.json`. Env precedence: process < framework `envFile` < `env{}` <
-per-agent `envFile`. Served agents get durable HITL threads (`threadId` =
-context id), health (`/ok`), CORS, and per-context isolation.
-
-## Minimal usage
+## Agent + tool in 15 lines
 
 ```ts
-import { Agent, InMemoryMemory, MockModelProvider, defineTool } from "framework-agents";
+import { Agent, defineTool, initChatModel } from "framework-agents";
 import { z } from "zod";
 
-const getTime = defineTool({
-  name: "get_time",
-  description: "Returns current ISO time",
-  schema: z.object({}),
-  execute: async () => ({ time: new Date().toISOString() }),
+const weather = defineTool({
+  name: "get_weather",
+  description: "Get the weather for a city.",
+  schema: z.object({ city: z.string() }),           // reaches the provider wire: models see real arg shapes
+  execute: async ({ city }) => `18c in ${city}`,
 });
 
 const agent = new Agent({
-  model: new MockModelProvider(),
-  tools: [getTime],
-  memory: new InMemoryMemory(),
+  model: initChatModel("together:Qwen/Qwen3.5-9B", { maxTokens: 1500 }),
+  tools: [weather],
+  budgets: { maxTokens: 5000, maxCostUsd: 0.05 },   // enforced after every model call
 });
 
-const result = await agent.run("What time is it?");
-console.log(result.text);
+const res = await agent.run("What's the weather in Tokyo?");
+console.log(res.text, res.toolCalls, res.usage.costUsd);
 ```
+
+## Streaming
+
+```ts
+for await (const e of agent.stream("Plan my trip to Berlin")) {
+  if (e.type === "token") process.stdout.write(e.delta);
+  if (e.type === "tool_call") console.log("\n[tool]", e.name);
+}
+```
+
+Token deltas arrive per model call; tool events stream live the moment the model dispatches (and the moment the result lands). Completions carry real `usage` (with `reasoningTokens`) and `costUsd` computed from the built-in price table — never guessed.
+
+## Surface
+
+| Area | Highlights |
+|---|---|
+| Event streaming | `run()` / `stream()` with typed events, abort + timeout, both `reasoning` field families (Together/OpenAI) parsed |
+| Structured output | zod schemas as native `response_format` or a self-repairing tool loop |
+| Budgets | token / USD / per-run deadline enforcement, per-model pricing table |
+| Middleware | before/after model+tool hooks, retries with backoff honoring retryable verdicts, human-in-the-loop (checkpointed resume, wildcard approvals), fallback chains, PII redaction, filesystem + subagents + todos |
+| State | persist history/state across restarts, snapshots, `pause()`/`resume()`, message edit + branching with timelines |
+| Multi-agent | orchestration (3 strategies), DAG workflows per-node retries, autonomous handoff swarms with loop detection |
+| Semantic | graph store with RDFS/OWL entailment + `why()` proofs, SHACL shapes, a validated write path, entity linking, ontology migration with conformance batteries |
+| Serving | A2A server/client (JSON-RPC + SSE), per-context isolation, MCP stdio + HTTP clients |
+| Python | same surface in `framework_agents` on PyPI — the A2A wire contract is conformance-tested across both stacks |
+
+## Publishing docs
+
+`docs/` builds with MkDocs (`mkdocs build --strict`) and deploys to GitHub Pages via `.github/workflows/docs.yml`.
