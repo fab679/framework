@@ -83,3 +83,5 @@ Other decisions: `{ edit: args }` rewrites the arguments, `{ reject: "reason" }`
 
 - [Middleware & HITL](middleware.md) — `humanInTheLoop` middleware that raises the interrupts above
 - [Multi-agent](multi-agent.md) — clones and coordination
+
+> Frontend cross-section: how sessions/threads/state appear to a React (or any SSE) client — [Sessions, threads & state](sessions-and-state.md).

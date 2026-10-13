@@ -107,3 +107,7 @@ const answer = useMutation({
 
 - [A2A & serving](a2a-serving.md) — the wire contract and server setup
 - [Streaming & events](streaming.md) — the event types mapped above
+
+## Sessions, threads & state
+
+The UI owns only an opaque `contextId`. What the server keeps per context (per-context agent, session persistence, HITL checkpoints) and the three server-side state lifetimes are covered in [Sessions, threads & state](sessions-and-state.md).

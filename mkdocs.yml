@@ -58,6 +58,7 @@ nav:
       - Structured output: guides/structured-output.md
       - Budgets & pricing: guides/budgets.md
       - Memory & sessions: guides/memory-sessions.md
+      - Sessions, threads & state (frontend): guides/sessions-and-state.md
       - Middleware & HITL: guides/middleware.md
       - Multi-agent: guides/multi-agent.md
       - Semantic graph (P2-sem): guides/semantic.md
