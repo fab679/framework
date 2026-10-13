@@ -104,7 +104,7 @@ describe("registries", () => {
       defineTool({
         name: "weird",
         description: "d",
-        schema: { parse: () => { throw "string-failure"; } } as never,
+        schema: { parse: () => { throw "string-failure"; } } as unknown as z.ZodTypeAny,
         execute: async () => 1,
       }),
     );

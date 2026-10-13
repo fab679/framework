@@ -12,7 +12,7 @@ export interface ToolResult {
 export interface Tool<TArgs = any, TOutput = any> {
   name: string;
   description: string;
-  schema: z.ZodType<TArgs>;
+  schema: z.ZodType<TArgs, z.ZodTypeDef, any>;
   /** Optional second arg receives ToolContext (state + invocationState). */
   execute: (args: TArgs, ctx?: ToolContext) => Promise<TOutput>;
   /**
@@ -20,16 +20,35 @@ export interface Tool<TArgs = any, TOutput = any> {
    * Default: JSON/string content, no artifact. Override to keep raw payloads
    * (retrieval metadata, debug blobs) out of the model's context.
    */
-  toResult?: (output: any) => ToolResult;
+  toResult?: (output: TOutput) => ToolResult;
+}
+
+/**
+ * The defineTool() input: TSchema drives inference — `execute` receives the
+ * schema's INPUT type (the agent loop passes the model's RAW args; parse
+ * inside `execute` when you need strict validation — no manual generic
+ * annotations needed):
+ *
+ *   defineTool({ schema: z.object({ city: z.string() }),
+ *                execute: async ({ city }) => ... })   // city: string
+ */
+export interface ToolSpec<TSchema extends z.ZodTypeAny = z.ZodTypeAny, TOutput = unknown> {
+  name: string;
+  description: string;
+  schema: TSchema;
+  execute: (args: z.input<TSchema>, ctx?: ToolContext) => Promise<TOutput>;
+  toResult?: (output: TOutput) => ToolResult;
 }
 
 export function defaultToResult(output: unknown): ToolResult {
   return { content: typeof output === "string" ? output : JSON.stringify(output) };
 }
 
-export function defineTool<TArgs, TOutput>(tool: Tool<TArgs, TOutput>): Tool<TArgs, TOutput> {
+export function defineTool<TSchema extends z.ZodTypeAny = z.ZodTypeAny, TOutput = unknown>(
+  tool: ToolSpec<TSchema, TOutput>,
+): Tool<z.output<TSchema>, TOutput> {
   if (!tool.name) throw new Error("Tool must have a name");
-  return tool;
+  return { ...tool } as Tool<z.output<TSchema>, TOutput>;
 }
 
 /** Validating registry — single place tools are looked up + arg-checked. */

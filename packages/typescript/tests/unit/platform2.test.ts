@@ -22,7 +22,7 @@ describe("RAG", () => {
 
   it("retrievalTool exposes search with validation", async () => {
     const tool = retrievalTool(new InMemoryRetriever(docs));
-    const hits = (await tool.execute({ query: "tea catechins" })) as { id: string }[];
+    const hits = (await tool.execute({ query: "tea catechins", k: 4 })) as { id: string }[];
     expect(hits[0].id).toBe("tea");
   });
 

@@ -794,7 +794,7 @@ function structuredTool(format: ResponseFormat): Tool {  const name = responseFo
   return defineTool({
     name,
     description: `Return the final answer as structured "${name}". Call exactly once with valid arguments.`,
-    schema: format.schema as never,
+    schema: format.schema,
     execute: async (args: unknown) => {
       attempts += 1;
       const parsed = (format.schema as z.ZodType<unknown>).safeParse(args);

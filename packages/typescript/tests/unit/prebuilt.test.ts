@@ -356,7 +356,7 @@ describe("toolRetryMiddleware full", () => {
     let n = 0;
     const agent = new Agent({
       model: toolStub([{ id: "c1", name: "db", args: {} }], "done"),
-      tools: [defineTool({ name: "db", description: "d", schema: z.object({}), execute: async () => { n += 1; throw stampRetryable(new Error("busy"), true); } })],
+      tools: [defineTool({ name: "db", description: "d", schema: z.object({}), execute: async (): Promise<string> => { n += 1; throw stampRetryable(new Error("busy"), true); } })],
       middleware: [toolRetryMiddleware({ maxRetries: 2, initialDelayMs: 1, onFailure: (e) => `DB down: ${e.message}` })],
     });
     const res = await agent.run("go");

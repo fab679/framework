@@ -132,7 +132,7 @@ describe("EntityLinker", () => {
   it("tool links mentions without inventing IRIs", async () => {
     const store = await linkedStore();
     const tool = linkEntityTool(new EntityLinker(store));
-    const out = (await tool.execute({ mention: "Bo" }, { agentName: "t", state: new (await import("../../src/state/index.js")).AgentState(), invocationState: {} })) as { iri: string }[];
+    const out = (await tool.execute({ mention: "Bo", k: 5 }, { agentName: "t", state: new (await import("../../src/state/index.js")).AgentState(), invocationState: {} })) as { iri: string }[];
     expect(out[0].iri).toBe("ex:bo");
   });
 

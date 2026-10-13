@@ -114,7 +114,7 @@ describe("SPARQL-subset", () => {
     await store.add([quad("ex:ada", "rdf:type", "ex:Person")]);
     const rows = (await sparqlSelectTool(store).execute({ query: "SELECT ?x WHERE { ?x rdf:type ex:Person }" })) as unknown[];
     expect(rows).toEqual([{ "?x": "ex:ada" }]);
-    const hits = (await ontologyLookupTool(store).execute({ term: "person" })) as unknown[];
+    const hits = (await ontologyLookupTool(store).execute({ term: "person", limit: 8 })) as unknown[];
     expect(hits.length).toBeGreaterThan(0);
   });
 });
