@@ -399,11 +399,12 @@ interface ToolResult {
 interface Tool<TArgs = any, TOutput = any> {
   name: string;
   description: string;
-  schema: z.ZodType<TArgs>;
+  /** Any zod version (v3/v4) or anything with .parse — registry validates. */
+  schema: { parse(input: unknown): unknown };
   /** Optional second arg receives ToolContext (state + invocationState). */
   execute: (args: TArgs, ctx?: ToolContext) => Promise<TOutput>;
   /** Split raw output into model-visible content + downstream artifact. */
-  toResult?: (output: any) => ToolResult;
+  toResult?: (output: TOutput) => ToolResult;
 }
 
 function defaultToResult(output: unknown): ToolResult;
