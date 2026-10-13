@@ -33,9 +33,9 @@ import { z } from "zod";
 const getWeather = defineTool({
   name: "get_weather",
   description: "Current weather for a city",
-  schema: z.object({ city: z.string() }),
-  execute: async ({ city }, ctx) => ({ city, tempC: 21 }),
-});
+  schema: z.object({ city: z.string() }),             // zod v3 or v4 — schema field is version-agnostic
+  execute: async ({ city }: { city: string }, ctx) => ({ city, tempC: 21 }),
+});                                              // ^ annotate execute's arg once: that type IS TArgs
 ```
 
 The zod `schema` is converted once per tool (zod-to-json-schema, `$refStrategy: "none"`) into a `parametersSchema` that rides the `tools` wire field. This is deliberate: descriptions alone leave argument shapes to guesswork — without `parameters` an OpenAI-compatible API advertises a zero-arg tool. Optional `toResult` splits raw output into model-visible `content` and downstream-only `artifact` (default: JSON/string content, no artifact) — reunion metadata, debug blobs, etc. stay out of the model's context while remaining on the `toolCalls` record.

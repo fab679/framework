@@ -415,10 +415,25 @@ payloads (retrieval metadata, debug blobs) out of the model's context.
 ### `defineTool`
 
 ```ts
-function defineTool<TArgs, TOutput>(tool: Tool<TArgs, TOutput>): Tool<TArgs, TOutput>;
+type AnySchema = { parse(input: unknown): unknown };
+
+interface ToolSpec<TArgs = any, TOutput = unknown> {
+  name: string;
+  description: string;
+  schema: AnySchema;                                  // zod v3 / v4 / anything with .parse
+  execute: (args: TArgs, ctx?: ToolContext) => Promise<TOutput>;
+  toResult?: (output: TOutput) => ToolResult;
+}
+
+function defineTool<TArgs = any, TOutput = unknown>(tool: ToolSpec<TArgs, TOutput>): Tool<TArgs, TOutput>;
 ```
 
-Identity helper that throws when `name` is missing.
+Helper that throws when `name` is missing. **TArgs is inferred from the
+`execute` annotation** (annotate the destructure once — that is the parsed
+shape), and `schema` accepts any zod version (v3, v4, or anything with
+`.parse`) so consumer projects on different zod majors work. `import { z }
+from "framework-agents"` re-exports the bundled instance if you want one zod
+everywhere.
 
 ### `ToolRegistry`
 

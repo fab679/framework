@@ -9,10 +9,17 @@ export interface ToolResult {
   artifact?: unknown;
 }
 
+/**
+ * Minimal structural contract for a schema — satisfied by zod v3, v4, minis,
+ * and anything with `.parse` (so consumers on ANY zod version work).
+ */
+export type AnySchema = { parse(input: unknown): unknown };
+
 export interface Tool<TArgs = any, TOutput = any> {
   name: string;
   description: string;
-  schema: z.ZodType<TArgs, z.ZodTypeDef, any>;
+  /** Any zod-like schema (v3/v4); the registry calls `.parse` for validation. */
+  schema: AnySchema;
   /** Optional second arg receives ToolContext (state + invocationState). */
   execute: (args: TArgs, ctx?: ToolContext) => Promise<TOutput>;
   /**
@@ -24,19 +31,18 @@ export interface Tool<TArgs = any, TOutput = any> {
 }
 
 /**
- * The defineTool() input: TSchema drives inference — `execute` receives the
- * schema's INPUT type (the agent loop passes the model's RAW args; parse
- * inside `execute` when you need strict validation — no manual generic
- * annotations needed):
+ * The defineTool() input: TArgs drives the arg type from `execute` itself
+ * (annotate the destructure once — that IS the parsed shape), and `schema`
+ * accepts any zod version (v3/v4) or anything with `.parse`:
  *
  *   defineTool({ schema: z.object({ city: z.string() }),
- *                execute: async ({ city }) => ... })   // city: string
+ *                execute: async ({ city }: { city: string }) => ... })
  */
-export interface ToolSpec<TSchema extends z.ZodTypeAny = z.ZodTypeAny, TOutput = unknown> {
+export interface ToolSpec<TArgs = any, TOutput = unknown> {
   name: string;
   description: string;
-  schema: TSchema;
-  execute: (args: z.input<TSchema>, ctx?: ToolContext) => Promise<TOutput>;
+  schema: AnySchema;
+  execute: (args: TArgs, ctx?: ToolContext) => Promise<TOutput>;
   toResult?: (output: TOutput) => ToolResult;
 }
 
@@ -44,11 +50,11 @@ export function defaultToResult(output: unknown): ToolResult {
   return { content: typeof output === "string" ? output : JSON.stringify(output) };
 }
 
-export function defineTool<TSchema extends z.ZodTypeAny = z.ZodTypeAny, TOutput = unknown>(
-  tool: ToolSpec<TSchema, TOutput>,
-): Tool<z.output<TSchema>, TOutput> {
+export function defineTool<TArgs = any, TOutput = unknown>(
+  tool: ToolSpec<TArgs, TOutput>,
+): Tool<TArgs, TOutput> {
   if (!tool.name) throw new Error("Tool must have a name");
-  return { ...tool } as Tool<z.output<TSchema>, TOutput>;
+  return { ...tool } as Tool<TArgs, TOutput>;
 }
 
 /** Validating registry — single place tools are looked up + arg-checked. */
