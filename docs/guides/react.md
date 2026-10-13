@@ -199,6 +199,85 @@ export const POST = (req: Request) => handleAgentRoute(req, client);
 stack (`serveFramework`), your own `A2AServer`, or the direct provider-backed
 setup. The proxy contract is `POST { text, contextId? }` → SSE frames.
 
+## Next.js implementation example (full wiring)
+
+A complete two-file Next.js (App Router) setup — one route handler proxying
+the agent, one page rendering the chat — plus env config.
+
+### 1. `app/api/agent/stream/route.ts` — the proxy route
+
+`handleAgentRoute` reads `POST { text, contextId? }`, forwards it upstream,
+and converts the run into SSE frames — including the disconnect propagation
+(a closed browser tab stops the upstream agent run).
+
+```ts
+import { AgentClient, handleAgentRoute } from "framework-agents";
+
+// process.env.AGENT_URL points at any Framework agent server:
+//  - a framework.json stack:      http://127.0.0.1:8484        (serveFramework)
+//  - your own A2AServer:           http://127.0.0.1:9100
+// The URL comes from the server's agent card / /ok endpoint to verify.
+const upstream = new AgentClient(process.env.AGENT_URL!, { timeoutMs: 300_000 });
+
+export const runtime = "nodejs";        // the proxy needs Node (not edge)
+
+export const POST = (req: Request) => handleAgentRoute(req, upstream);
+export const maxDuration = 300;         // keep long agent runs alive
+```
+
+Also stream the agent card for discovery/debugging if you like:
+
+```ts
+export async function GET() {
+  const card = await upstream.getCard();
+  return Response.json(card);
+}
+```
+
+### 2. `app/page.tsx` — the chat UI
+
+```tsx
+"use client";
+
+import { AgentChat } from "@/components/AgentChat";
+
+export default function Home() {
+  return <AgentChat endpoint="/api/agent" />;
+}
+```
+
+(`AgentChat` is the complete component above — drop it into
+`components/AgentChat.tsx`.)
+
+### 3. `.env.local`
+
+```bash
+# Server-side: where the Framework agent server lives.
+AGENT_URL=http://127.0.0.1:8484
+```
+
+### 4. Multi-turn — what happens end-to-end
+
+1. First send posts `{ text }` with no `contextId` → the server mints
+   `ctx-…`, and every SSE frame carries it → `send` resolves (or the hook's
+   `contextId` state updates) → the component persists it (localStorage).
+2. Reload/navigation: the component re-initializes with the stored handle;
+   the served agent (its per-context memory/session) continues the thread.
+3. Second send posts `{ text, contextId }` → the same agent instance
+   (`agentFactory(contextId)`, LRU-cached) answers with prior history.
+4. The user hits Stop → the browser aborts → `req.signal` fires → the proxy
+   stops pulling frames → the upstream `A2AServer`/serve run is cancelled.
+
+### 5. Deploying the agent yourself instead of proxying
+
+Alternatively run the agent server *in* the Next.js process
+(`serverExternalPackages` for any native deps) — or skip the proxy entirely
+for trusted intranet clients and point `useAgent` at
+`http://127.0.0.1:8484` directly; the hook is transport-agnostic. The proxy
+exists so the browser never talks to the agent network directly and so
+`AGENT_URL` secrets stay server-side.
+
+
 ## Persisting conversations across page loads
 
 `contextId` round-trips through the server: pass it back and the served agent
