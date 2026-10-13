@@ -32,3 +32,4 @@ export * from "./mcp/index.js";
 export * from "./prompts/index.js";
 export * from "./semantic/index.js";
 export * from "./utils/index.js";
+export * as z from "zod";
