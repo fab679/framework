@@ -132,3 +132,28 @@ Live examples live in `examples/` — see [live examples](live-examples.md).
 - [Memory & sessions](../guides/memory-sessions.md)
 - [Middleware & HITL](../guides/middleware.md)
 - [A2A & serving](../guides/a2a-serving.md)
+
+
+## "Do I have to `await` everything?"
+
+Only what touches the network or disk - which is the same rule the TypeScript
+package follows (`await agent.run(...)` works there too; Python just needs a
+one-line event loop at your entry point, the equivalent of JS top-level await).
+
+| Always `await` / `async for` | Always plain |
+| --- | --- |
+| `run` / `stream` (async for) / `resume` / `pause` / `branch` / `edit_message` | constructors (`Agent`, options dataclasses, providers) |
+| `Memory`: `load` / `save` / `clear` ; `Storage`: all ops ; `Checkpointer`: all ops | `define_tool` + every middleware factory |
+| provider `complete` ; streamed tools inside the loop call | `init_chat_model` / `load_config` / `price_for` / `usage_cost` |
+| orchestration / workflows / swarm / evals / conformance (`run_*`) | message factories + `serialize_messages` / `text_of` |
+| A2A client `send` / `get_card` / `stream` ; server `start` / `stop` | `state.get` / `set` / `to_json` |
+| semantic store ops, `review_ontology` / `propose_shapes` / `adopt_shapes` / `migrate_t_box` | `quads_to_json_ld` / `json_ld_to_quads` / `parse_skill_file` / `match_skills` |
+
+Notes:
+
+- **Tool `execute` is awaited by the loop** - you write `async def weather(...)`,
+  you never await it yourself. Same for `AgentStream`: `async for` over it, the
+  final result lands in `stream.result` (or `agent.run`'s return).
+- There is deliberately **no sync-mode clone** of the API: a sync/async duality
+  would maintain two inconsistent surfaces. If you want a blocking one-liner at
+  the top level, it is just `asyncio.run(agent.run("hi"))`.

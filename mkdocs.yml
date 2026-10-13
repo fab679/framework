@@ -2,7 +2,7 @@ site_name: Framework Agents
 site_description: TypeScript-first + Python-parity agent framework — tools, streaming, budgets, middleware, multi-agent, semantic graph, A2A serving
 site_url: https://fab679.github.io/framework/
 repo_url: https://github.com/fab679/framework
-repo_name: fabisch/framework
+repo_name: fab679/framework
 edit_uri: edit/main/docs/
 
 theme:
