@@ -1,0 +1,17 @@
+{
+ "at": "2026-10-12T16:28:07.313Z",
+ "rows": [
+  {
+   "name": "plain-run",
+   "runs": 20,
+   "p50Ms": 0,
+   "tokensPerRun": 150
+  },
+  {
+   "name": "model-5ms",
+   "runs": 10,
+   "p50Ms": 6,
+   "tokensPerRun": 150
+  }
+ ]
+}

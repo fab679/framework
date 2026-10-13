@@ -1,0 +1,47 @@
+# deps
+node_modules/
+.pnpm-store/
+.turbo/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# test / coverage
+coverage/
+.nyc_output/
+
+# env
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+*.log
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# python (future package)
+__pycache__/
+*.pyc
+.venv/
+.uv/
+
+# docs build
+site/
+.venv-docs/
+
+# python package build
+packages/python/dist/
+packages/python/build/
+*.egg-info/
+uv.lock
+
+# npm tarballs
+*.tgz
+
+# doc scripts / temp
+claude.md

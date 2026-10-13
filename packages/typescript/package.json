@@ -1,0 +1,73 @@
+{
+  "name": "framework-agents",
+  "version": "0.1.0",
+  "description": "TypeScript agent framework: ReAct loop, tools, memory, streaming, budgets, middleware, multi-agent, semantic graph, A2A serving",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "framework-serve": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx --watch ./src/index.ts",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "lint": "eslint src tests examples eval bench",
+    "eval": "tsx eval/run.ts",
+    "bench": "tsx bench/run.ts",
+    "schema": "tsx scripts/gen-schema.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist coverage"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.7",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@vitest/coverage-v8": "^2.1.9",
+    "eslint": "^9.12.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.71.1",
+    "vitest": "^2.1.2"
+  },
+  "keywords": [
+    "agents",
+    "llm",
+    "ai",
+    "typescript",
+    "streaming",
+    "mcp",
+    "a2a",
+    "semantic-web"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fabisch/framework.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  }
+}

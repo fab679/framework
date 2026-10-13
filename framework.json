@@ -1,0 +1,24 @@
+{
+  "$schema": "./framework.schema.json",
+  "server": { "host": "127.0.0.1", "basePort": 8484 },
+  "envFile": "./.env",
+  "env": { "FRAMEWORK_ENV": "production" },
+  "checkpointer": { "dir": "./checkpoints" },
+  "http": { "corsOrigins": ["http://localhost:3000"] },
+  "agents": [
+    {
+      "name": "helper",
+      "description": "General-purpose helper with workspace files and todos.",
+      "systemPrompt": "You are a helpful agent. Use tools when needed. Be concise.",
+      "model": "together:Qwen/Qwen3.5-9B",
+      "skills": ["./skills"],
+      "filesystem": "./workspace",
+      "todos": true,
+      "maxSteps": 8,
+      "sessionDir": "./sessions"
+    },
+    {
+      "file": "./agents/local.json"
+    }
+  ]
+}

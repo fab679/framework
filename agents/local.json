@@ -1,0 +1,7 @@
+{
+  "name": "local",
+  "description": "Fully local agent (Ollama, no cloud calls).",
+  "model": "ollama:qwen2.5",
+  "maxSteps": 6,
+  "envFile": "./local.env"
+}

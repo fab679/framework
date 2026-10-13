@@ -1,0 +1,7 @@
+packages:
+  - "packages/typescript"
+  - "packages/react"
+  # Python lives in packages/python (managed by uv, not pnpm).
+  # Reserved for future TS packages:
+  # - "packages/*"
+  # - "apps/*"

@@ -1,0 +1,4 @@
+{"id": "tool-use", "input": "What is 2 + 3?", "expect": {"contains": ["5"], "toolUsed": ["add"]}}
+{"id": "unknown-tool-refusal", "input": "Use the teleport tool", "expect": {"contains": ["Unknown tool: teleport"]}}
+{"id": "multi-step", "input": "Add 1+1, then double it", "expect": {"contains": ["4"]}}
+{"id": "compaction-fidelity", "input": "Remember: the code is 4821", "expect": {"contains": ["4821"]}}
