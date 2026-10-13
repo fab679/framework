@@ -168,6 +168,12 @@ class Agent:
         checkpointer: Any = None,
         thread_id: Optional[str] = None,
     ) -> AgentResult: ...
+
+    # Blocking one-liners for scripts AND notebooks — they detect the running
+    # loop: scripts get asyncio.run on the spot; notebooks (whose loop is
+    # already running) execute on a private loop in a worker thread.
+    def run_sync(self, input_text: str, **kwargs: Any) -> AgentResult: ...
+    def stream_sync(self, input_text: str, **kwargs: Any) -> Generator[StreamEvent, None, None]: ...
 ```
 
 Semantics match the TS loop (see [Pinned semantics](../reference/pinned-semantics.md)):
