@@ -14,8 +14,8 @@ together.
 ## Before you publish: fix the placeholders
 
 The `repository.url` in **all three** packaging manifests still points at
-`https://github.com/fabisch/framework` (and pyproject's
-`Homepage`/`Documentation` URLs at `fabisch.github.io`). Replace them with
+`https://github.com/fab679/framework` (and pyproject's
+`Homepage`/`Documentation` URLs at `fab679.github.io`). Replace them with
 the real GitHub org once it exists. The same goes for `site_url` / `repo_url`
 in `mkdocs.yml` — the GitHub Pages workflow publishes to wherever that
 points, and until it is set the site URL advertised in the page metadata is

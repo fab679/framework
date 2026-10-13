@@ -26,10 +26,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/fabisch/framework"
-Documentation = "https://fabisch.github.io/framework/"
-Repository = "https://github.com/fabisch/framework"
-Changelog = "https://github.com/fabisch/framework/releases"
+Homepage = "https://github.com/fab679/framework"
+Documentation = "https://fab679.github.io/framework/"
+Repository = "https://github.com/fab679/framework"
+Changelog = "https://github.com/fab679/framework/releases"
 
 [project.optional-dependencies]
 dev = [
