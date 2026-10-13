@@ -30,7 +30,7 @@ export interface ResponseFormatWire {
 export interface CompleteOptions {
   messages: ChatMessage[];
   /** Tool metadata; `parametersSchema` (JSON Schema) lets models call with real args — omit only for zero-arg tools. */
-  tools: { name: string; description: string; parametersSchema?: Record<string, unknown> }[];
+  tools?: { name: string; description: string; parametersSchema?: Record<string, unknown> }[];
   /** Native structured output (OpenAI `response_format`). Honored when the provider supports it. */
   responseFormat?: ResponseFormatWire;
   /** Streamed text deltas (non-thinking). */

@@ -237,70 +237,94 @@ class AnthropicProvider:
         json_input = ""
         buffer = ""
         event = ""
-        async for chunk in res.aiter_text():
-            buffer += chunk
-            lines = buffer.split("\n")
-            buffer = lines.pop()
-            for line in lines:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                if stripped.startswith("event:"):
-                    # CRITICAL: the event name must carry across chunk
-                    # boundaries — re-initializing per chunk silently drops
-                    # every delta whose event line landed in a prior packet.
-                    event = stripped[6:].strip()
-                    continue
-                if not stripped.startswith("data:"):
-                    continue
-                payload = stripped[5:].strip()
-                if not payload:
-                    continue
-                try:
-                    data = json.loads(payload)
-                except ValueError:
-                    continue
-                if event == "message_start":
-                    # message_start carries the input-side usage up front.
-                    message = data.get("message") or {}
-                    usage = message.get("usage") or {}
-                    if usage.get("input_tokens") is not None:
-                        input_tokens = usage["input_tokens"]
-                elif event == "message_delta":
-                    # message_delta.usage.output_tokens is cumulative — assign.
-                    usage = data.get("usage") or {}
-                    if usage.get("output_tokens") is not None:
-                        output_tokens = usage["output_tokens"]
-                    delta = data.get("delta") or {}
-                    if delta.get("stop_reason"):
-                        stop_reason = _normalize_stop(delta["stop_reason"])
-                elif event == "content_block_start":
-                    block = data.get("content_block") or {}
-                    current = {"type": block.get("type"), "id": block.get("id"), "name": block.get("name")}
-                    json_input = ""
-                elif event == "content_block_delta":
-                    delta = data.get("delta") or {}
-                    if delta.get("text"):
-                        text += delta["text"]
-                        current = current or {"type": "text"}
-                        current["text"] = (current.get("text") or "") + delta["text"]
-                        options.on_token and options.on_token(delta["text"])
-                    elif delta.get("thinking"):
-                        thinking += delta["thinking"]
-                        current = current or {"type": "thinking"}
-                        current["thinking"] = (current.get("thinking") or "") + delta["thinking"]
-                        options.on_thinking and options.on_thinking(delta["thinking"])
-                    elif delta.get("partial_json"):
-                        json_input += delta["partial_json"]
-                elif event == "content_block_stop":
-                    if current is not None:
-                        if current.get("type") == "tool_use":
-                            try:
-                                current["input"] = json.loads(json_input or "{}")
-                            except ValueError:
-                                current["input"] = {}
-                        blocks.append(current)
-                        current = None
+        # Retry-verdict rule: once a delta (text/thinking/tool fragment)
+        # reached the caller, a mid-stream failure is NON-retryable (re-running
+        # would duplicate already-streamed text); before any delta, failures
+        # stay retryable (nothing was delivered).
+        delivered = False
+        try:
+            async for chunk in res.aiter_text():
+                buffer += chunk
+                lines = buffer.split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if stripped.startswith("event:"):
+                        # CRITICAL: the event name must carry across chunk
+                        # boundaries — re-initializing per chunk silently drops
+                        # every delta whose event line landed in a prior packet.
+                        event = stripped[6:].strip()
+                        continue
+                    if not stripped.startswith("data:"):
+                        continue
+                    payload = stripped[5:].strip()
+                    if not payload:
+                        continue
+                    try:
+                        data = json.loads(payload)
+                    except ValueError:
+                        continue
+                    if event == "message_start":
+                        # message_start carries the input-side usage up front.
+                        message = data.get("message") or {}
+                        usage = message.get("usage") or {}
+                        if usage.get("input_tokens") is not None:
+                            input_tokens = usage["input_tokens"]
+                    elif event == "message_delta":
+                        # message_delta.usage.output_tokens is cumulative — assign.
+                        usage = data.get("usage") or {}
+                        if usage.get("output_tokens") is not None:
+                            output_tokens = usage["output_tokens"]
+                        delta = data.get("delta") or {}
+                        if delta.get("stop_reason"):
+                            stop_reason = _normalize_stop(delta["stop_reason"])
+                    elif event == "content_block_start":
+                        block = data.get("content_block") or {}
+                        current = {"type": block.get("type"), "id": block.get("id"), "name": block.get("name")}
+                        json_input = ""
+                    elif event == "content_block_delta":
+                        delta = data.get("delta") or {}
+                        if delta.get("text"):
+                            text += delta["text"]
+                            delivered = True
+                            current = current or {"type": "text"}
+                            current["text"] = (current.get("text") or "") + delta["text"]
+                            options.on_token and options.on_token(delta["text"])
+                        elif delta.get("thinking"):
+                            thinking += delta["thinking"]
+                            # Thinking deltas reach the caller like text deltas
+                            # do — the delivered verdict covers them (and the
+                            # tool fragment below).
+                            delivered = True
+                            current = current or {"type": "thinking"}
+                            current["thinking"] = (current.get("thinking") or "") + delta["thinking"]
+                            options.on_thinking and options.on_thinking(delta["thinking"])
+                        elif delta.get("partial_json"):
+                            # Tool-call fragments are delivered state too: a
+                            # retry would re-issue a call mid-assembly, so the
+                            # attempt counts as spent.
+                            delivered = True
+                            json_input += delta["partial_json"]
+                    elif event == "content_block_stop":
+                        if current is not None:
+                            if current.get("type") == "tool_use":
+                                try:
+                                    current["input"] = json.loads(json_input or "{}")
+                                except ValueError:
+                                    current["input"] = {}
+                            blocks.append(current)
+                            current = None
+        except Exception as err:
+            # Delivered-aware verdict: deltas already streamed => non-retryable
+            # (a retry would duplicate the delivered text); before any delta
+            # the failure stays retryable.
+            raise AgentError(
+                "MODEL_ERROR",
+                f"Stream broke mid-response{' (deltas already delivered)' if delivered else ''}: {err}",
+                retryable=not delivered,
+            ) from err
         if current is not None:
             blocks.append(current)
 

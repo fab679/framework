@@ -1,5 +1,5 @@
 import type { StreamEvent } from "../streaming/index.js";
-import { ToolRejection, HitlInterrupt, type AgentMiddleware, type HookContext, type HitlDecision, type ModelRequest } from "../middleware/index.js";
+import { ToolRejection, HitlInterrupt, getRetryable, stampRetryable, type AgentMiddleware, type HookContext, type HitlDecision, type ModelRequest } from "../middleware/index.js";
 import { NullConversationManager, type ConversationManager } from "../conversation/index.js";
 import { AgentState, type InvocationState } from "../state/index.js";
 import type { Checkpointer } from "../checkpoint/index.js";
@@ -27,7 +27,7 @@ import { defaultToResult, defineTool, type Tool } from "../tools/index.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { Memory } from "../memory/index.js";
 import { InMemoryMemory } from "../memory/index.js";
-import type { ModelProvider } from "../models/index.js";
+import type { ModelCompletion, ModelProvider } from "../models/index.js";
 import { priceFor, usageCost, type ModelPrice } from "../models/pricing.js";
 import type { AgentEvents } from "../observability/index.js";
 import { runWithBudget } from "../runtime/index.js";
@@ -92,6 +92,31 @@ export interface RunOptions {
   /** Checkpointed HITL: persist + resume human approvals locally. */
   checkpointer?: Checkpointer;
   threadId?: string;
+}
+
+/** Internal: live-delta channel between provider streaming callbacks and
+ *  the runLoop. push() = provider side (sync, during the HTTP read); the
+ *  loop drains it concurrently while the provider call is still running. */
+class EventQueue<T> {
+  private items: T[] = [];
+  private wakes: (() => void)[] = [];
+  private closed = false;
+  push(item: T): void {
+    this.items.push(item);
+    this.wakes.shift()?.();
+  }
+  close(): void {
+    this.closed = true;
+    for (const w of this.wakes.splice(0)) w();
+  }
+  async next(): Promise<{ done: true } | { done: false; value: T }> {
+    for (;;) {
+      const item = this.items.shift();
+      if (item !== undefined) return { done: false, value: item };
+      if (this.closed) return { done: true };
+      await new Promise<void>((resolve) => this.wakes.push(resolve));
+    }
+  }
 }
 
 const DEFAULT_SYSTEM = "You are a helpful agent. Use tools when needed. Be concise.";
@@ -544,30 +569,91 @@ export class Agent {
       };
       for (const mw of middleware) req = (await mw.beforeModel?.(req, ctxFor(step))) ?? req;
 
-      const pending: ({ type: "token"; delta: string } | { type: "thinking"; delta: string })[] = [];
-      const callModel = (r: ModelRequest) =>
-        model.complete({
-          ...r,
-          // Propagate the run's abort into the in-flight provider request.
-          ...(signal ? { signal } : {}),
-          onToken: (d) => {
-            events?.onToken?.(d);
-            pending.push({ type: "token", delta: d });
-          },
-          onThinking: (d) => {
-            events?.onThinking?.(d);
-            pending.push({ type: "thinking", delta: d });
-          },
-        });
+      // Live streaming engages only when no middleware declares wrapModel
+      // (replaying deltas the consumer already saw would duplicate text) or
+      // afterModel (output scrubbing must run BEFORE tokens reach the UI).
+      // Otherwise deltas stream LIVE via a channel while the model call is
+      // still running; the batched fallback buffers until it settles.
+      const needsBatching = middleware.some((mw) => mw.wrapModel || mw.afterModel);
+      const buffered: ({ type: "token"; delta: string } | { type: "thinking"; delta: string })[] = [];
+      const channel = new EventQueue<{ type: "token"; delta: string } | { type: "thinking"; delta: string }>();
+      const emitDelta = (type: "token" | "thinking", d: string) => {
+        const event = { type, delta: d } as const;
+        if (needsBatching) buffered.push(event);
+        else channel.push(event);
+      };
+      // One closure per attempt (the wrap chain re-invokes callModel on every
+      // retry): deltas buffered by a FAILED attempt never flush — the retry's
+      // attempt replaces them. Live path: deltas went onto the channel and
+      // were already delivered, so there is nothing to roll back by design.
+      const callModel = (r: ModelRequest) => {
+        const start = buffered.length;
+        let failed = false;
+        try {
+          return model.complete({
+            ...r,
+            // Propagate the run's abort into the in-flight provider request.
+            ...(signal ? { signal } : {}),
+            onToken: (d) => {
+              events?.onToken?.(d);
+              if (failed) return;
+              emitDelta("token", d);
+            },
+            onThinking: (d) => {
+              events?.onThinking?.(d);
+              if (failed) return;
+              emitDelta("thinking", d);
+            },
+          }).catch((err: unknown) => {
+            failed = true;
+            buffered.splice(start);
+            throw err;
+          });
+        } catch (err) {
+          failed = true;
+          buffered.splice(start);
+          throw err;
+        }
+      };
       const modelChain = middleware
         .filter((mw) => mw.wrapModel)
         .reduceRight(
           (next, mw) => (r: ModelRequest) => mw.wrapModel!(r, next, ctxFor(step)),
           callModel,
         );
-      let completion = await modelChain(req);
-      for (const e of pending.splice(0)) {
-        if (e.delta !== "") yield e;
+      let deltasEmittedThisCall = false;
+      let completion: ModelCompletion;
+      const pendingCompletion = modelChain(req).then(
+        (c) => { channel.close(); return c; },
+        (e) => { channel.close(); throw e; },
+      );
+      pendingCompletion.catch(() => {}); // rejection handled at the await below
+      try {
+        if (needsBatching) {
+          completion = await pendingCompletion;
+          for (const e of buffered.splice(0)) {
+            if (e.delta !== "") yield e;
+          }
+        } else {
+          for (;;) {
+            const next = await channel.next();
+            if (next.done) break;
+            deltasEmittedThisCall = true;
+            if (next.value.delta !== "") yield next.value;
+          }
+          completion = await pendingCompletion;
+        }
+      } catch (err) {
+        // Belt-and-braces for the batched path: nothing buffered from failed
+        // attempts may ever flush. A LIVE-path failure after deltas were
+        // delivered must not be retried (the retry would duplicate text) —
+        // our providers stamp that in the stream guard; foreign providers
+        // (no verdict at all) get it stamped here.
+        buffered.splice(0);
+        if (deltasEmittedThisCall && getRetryable(err) === undefined) {
+          stampRetryable(err as Error, false);
+        }
+        throw err;
       }
       for (const mw of [...middleware].reverse()) completion = (await mw.afterModel?.(completion, req, ctxFor(step))) ?? completion;
 

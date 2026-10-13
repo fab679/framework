@@ -82,5 +82,5 @@ Decisions: `"approve"` (run), `{ edit: args }` (rewritten args), `{ reject: "rea
 ## Related
 
 - [Memory & sessions](memory-sessions.md) — checkpoint/resume built on these interrupts
-- [Streaming & events](streaming.md) — how `wrapModel` interacts with event batching
+- [Streaming & events](streaming.md) — how `wrapModel` selects the batched delta fallback and interacts with retry verdicts
 - [Budgets](budgets.md) — verdict-driven retry pass-through

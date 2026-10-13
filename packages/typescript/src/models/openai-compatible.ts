@@ -125,9 +125,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
           }
         : {}),
       messages: options.messages.map(toWireMessage),
-      ...(options.tools.length
+      ...(options.tools?.length
         ? {
-            tools: options.tools.map((t) => ({
+            tools: (options.tools ?? []).map((t) => ({
               type: "function",
               function: {
                 name: t.name,
@@ -210,105 +210,132 @@ export class OpenAICompatibleProvider implements ModelProvider {
   /** SSE: `data: {...}` lines; delta.content -> onToken, delta.reasoning_content -> onThinking. */
   private async readStream(res: Response, options: CompleteOptions): Promise<ModelCompletion> {
     if (!res.body) throw new Error("Streaming response has no body");
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let text = "";
-    let thinking = "";
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let reasoningTokens: number | undefined;
-    let finishReason: string | undefined;
-    const toolArgBuffers = new Map<number, { id: string; name: string; args: string }>();
-    let buffer = "";
+    return this._readSse(res.body, options).catch((err) => {
+      // aborts rethrown; AgentErrors carry their (delivered-aware) verdict
+      if (err instanceof AgentError || (err instanceof Error && err.name === "AbortError")) throw err;
+      throw new AgentError("MODEL_ERROR", `Stream broke mid-response: ${err}`, false);
+    });
+  }
 
-    const flush = (chunk: string) => {
-      buffer += chunk;
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const t = line.trim();
-        if (!t.startsWith("data:")) continue;
-        const payload = t.slice(5).trim();
-        if (payload === "[DONE]") continue;
-        let evt: {
-          choices?: { delta?: StreamDelta; finish_reason?: string | null }[];
-          usage?: null | { prompt_tokens?: number; completion_tokens?: number; reasoning_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } };
-        };
-        try {
-          evt = JSON.parse(payload);
-        } catch {
-          continue;
+  private async _readSse(body: ReadableStream<Uint8Array>, options: CompleteOptions): Promise<ModelCompletion> {
+    // Retry-verdict rule: once deltas reach the caller, a mid-stream failure
+    // is NON-retryable (re-running would duplicate already-streamed text);
+    // before any delta, failures stay retryable (nothing was delivered).
+    let delivered = false;
+    try {
+      const reader = body.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      let thinking = "";
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let reasoningTokens: number | undefined;
+      let finishReason: string | undefined;
+      const toolArgBuffers = new Map<number, { id: string; name: string; args: string }>();
+      let buffer = "";
+
+      const flush = (chunk: string) => {
+        buffer += chunk;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t.startsWith("data:")) continue;
+          const payload = t.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          let evt: {
+            choices?: { delta?: StreamDelta; finish_reason?: string | null }[];
+            usage?: null | { prompt_tokens?: number; completion_tokens?: number; reasoning_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } };
+          };
+          try {
+            evt = JSON.parse(payload);
+          } catch {
+            continue;
+          }
+          if (evt.choices?.[0]?.finish_reason) finishReason = evt.choices[0].finish_reason ?? undefined;
+          // The usage-only final chunk has an empty/partial choices array and a
+          // NON-NULL usage Together sends `"usage": null` on content chunks.
+          if (evt.usage) {
+            if (evt.usage.prompt_tokens != null) inputTokens = evt.usage.prompt_tokens;
+            if (evt.usage.completion_tokens != null) outputTokens = evt.usage.completion_tokens;
+            const rt = reasoningOf(evt.usage);
+            if (rt != null) reasoningTokens = rt;
+            continue;
+          }
+          const delta = evt.choices?.[0]?.delta;
+          if (!delta) continue;
+          const think = thinkingOf(delta);
+          if (think) {
+            thinking += think;
+            // Thinking deltas reach the caller like token deltas do — the
+            // delivered verdict covers them (as well as tool fragments).
+            delivered = true;
+            options.onThinking?.(think);
+          }
+          if (delta.content) {
+            text += delta.content;
+            delivered = true;
+            options.onToken?.(delta.content);
+          }
+          for (const [i, tc] of (delta.tool_calls ?? []).entries()) {
+            const key = tc.index ?? i;
+            // Tool-call fragments are delivered state too: a retry would
+            // re-issue a call mid-assembly, so treat the attempt as spent.
+            delivered = true;
+            const slot = toolArgBuffers.get(key) ?? { id: "", name: "", args: "" };
+            if (tc.id) slot.id = tc.id;
+            if (tc.function?.name) slot.name = tc.function.name;
+            if (tc.function?.arguments) slot.args += tc.function.arguments;
+            toolArgBuffers.set(key, slot);
+          }
         }
-        if (evt.choices?.[0]?.finish_reason) finishReason = evt.choices[0].finish_reason ?? undefined;
-        // The usage-only final chunk has an empty/partial choices array and a
-        // NON-NULL usage Together sends `"usage": null` on content chunks.
-        if (evt.usage) {
-          if (evt.usage.prompt_tokens != null) inputTokens = evt.usage.prompt_tokens;
-          if (evt.usage.completion_tokens != null) outputTokens = evt.usage.completion_tokens;
-          const rt = reasoningOf(evt.usage);
-          if (rt != null) reasoningTokens = rt;
-          continue;
-        }
-        const delta = evt.choices?.[0]?.delta;
-        if (!delta) continue;
-        const think = thinkingOf(delta);
-        if (think) {
-          thinking += think;
-          options.onThinking?.(think);
-        }
-        if (delta.content) {
-          text += delta.content;
-          options.onToken?.(delta.content);
-        }
-        for (const [i, tc] of (delta.tool_calls ?? []).entries()) {
-          const key = tc.index ?? i;
-          const slot = toolArgBuffers.get(key) ?? { id: "", name: "", args: "" };
-          if (tc.id) slot.id = tc.id;
-          if (tc.function?.name) slot.name = tc.function.name;
-          if (tc.function?.arguments) slot.args += tc.function.arguments;
-          toolArgBuffers.set(key, slot);
-        }
+      };
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        flush(decoder.decode(value, { stream: true }));
       }
-    };
+      flush(decoder.decode());
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      flush(decoder.decode(value, { stream: true }));
+      // Same reasoning-split guard as readJson: answer landed in the reasoning
+      // channel and the stream carried NO content or tool calls.
+      if (!text && !toolArgBuffers.size && thinking && finishReason === "stop") {
+        throw new AgentError(
+          "MODEL_ERROR",
+          "Stream ended at finish_reason=stop having put the entire answer in the reasoning channel (no content, no tool calls, thinking present). The reasoning/content split lost the reply \u2014 retry or raise maxTokens.",
+          true,
+        );
+      }
+      // Same silent-empty guard as readJson: thought-past-budget stream.
+      if (!text && !toolArgBuffers.size && finishReason === "length") {
+        throw new AgentError(
+          "MODEL_ERROR",
+          `Stream ended at finish_reason=length with no content (${outputTokens} tokens burned). Raise maxTokens.`,
+          false,
+        );
+      }
+      return {
+        text,
+        ...(thinking ? { thinking } : {}),
+        ...(finishReason ? { finishReason } : {}),
+        toolCalls: [...toolArgBuffers.values()]
+          // Streamed ids must not repeat across turns (Anthropic rejects duplicates).
+          .map((t) => ({ id: t.id || `call_${++callSeq}`, name: t.name, args: safeJson(t.args) })),
+        usage: {
+          inputTokens,
+          outputTokens,
+          ...(reasoningTokens != null ? { reasoningTokens } : {}),
+        },
+      };
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") throw err;
+      // Explicit AgentError verdicts (reasoning-split / silent-empty guards)
+      // pass through untouched.
+      if (err instanceof AgentError) throw err;
+      // delivered-aware verdict: deltas already streamed => non-retryable
+      throw new AgentError("MODEL_ERROR", `Stream broke mid-response${delivered ? " (deltas already delivered)" : ""}: ${err}`, !delivered);
     }
-    flush(decoder.decode());
-
-    // Same reasoning-split guard as readJson: answer landed in the reasoning
-    // channel and the stream carried NO content or tool calls.
-    if (!text && !toolArgBuffers.size && thinking && finishReason === "stop") {
-      throw new AgentError(
-        "MODEL_ERROR",
-        "Stream ended at finish_reason=stop having put the entire answer in the reasoning channel (no content, no tool calls, thinking present). The reasoning/content split lost the reply — retry or raise maxTokens.",
-        true,
-      );
-    }
-    // Same silent-empty guard as readJson: thought-past-budget stream.
-    if (!text && !toolArgBuffers.size && finishReason === "length") {
-      throw new AgentError(
-        "MODEL_ERROR",
-        `Stream ended at finish_reason=length with no content (${outputTokens} tokens burned). Raise maxTokens.`,
-        false,
-      );
-    }
-    return {
-      text,
-      ...(thinking ? { thinking } : {}),
-      ...(finishReason ? { finishReason } : {}),
-      toolCalls: [...toolArgBuffers.values()]
-        .filter((t) => t.name)
-        // Streamed ids must not repeat across turns (Anthropic rejects duplicates).
-        .map((t) => ({ id: t.id || `call_${++callSeq}`, name: t.name, args: safeJson(t.args) })),
-      usage: {
-        inputTokens,
-        outputTokens,
-        ...(reasoningTokens != null ? { reasoningTokens } : {}),
-      },
-    };
   }
 }
 

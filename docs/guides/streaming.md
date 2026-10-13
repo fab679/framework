@@ -43,12 +43,13 @@ result = stream.result   # this run's AgentResult, never another concurrent run'
 
 Per-run abort/timeout guards live in `runtime.py`: `AbortHandle` (`set()` to abort, `.aborted`, `.throw_if_aborted()`) and `run_with_budget(fn, Budget(signal=asyncio.Event | None, timeout_ms=None))`, an `ABORTED`/`TIMEOUT` race. `AgentClient.stream(text, context_id, signal, on_context=...)` accepts an abort-like signal (`is_set()`/`done()` probe) so HTTP consumers can stop mid-stream.
 
-## Event-batching semantics
+## Delta delivery: live streaming with a batched fallback
 
-Token and thinking deltas **batch per model call** in both languages: the provider fires `onToken`/`onThinking` into the events hooks live, but the stream buffers the deltas and yields them only after `wrapModel` middleware resolves and usage is accumulated. Consequences:
+Token and thinking deltas stream **LIVE during the model call** in both languages: as soon as the provider fires `onToken`/`onThinking`, the deltas yield to the consumer while the call is still in flight — no waiting for the call to finish. This engages whenever **no middleware declares `wrapModel` or `afterModel`**; with such middleware present, a **batched fallback** buffers the deltas and yields them only after the call settles (a `wrapModel` retry belongs to the same burst — deltas a FAILED attempt buffered are rolled back and never flush). Consequences:
 
-- Tool events (`tool_call`, `tool_result`) yield live, mid-run — tool execution visibly interleaves with the buffered text of the call that requested it.
+- Tool events (`tool_call`, `tool_result`) yield live, mid-run — tool execution visibly interleaves with the deltas of the call that requested it.
 - A `wrapModel` middleware may retry the call; the consumer sees one burst of deltas per completed attempt, never a torn mix.
+- Retries never duplicate streamed text: once deltas have reached the caller, the providers stamp a mid-stream failure **non-retryable** (the delivered-verdict contract — before any delta, failures stay retryable) and the loop propagates without stamping an explicit verdict further.
 - `thinking` deltas are separate events; text deltas remain in `token`.
 
 ## Streaming provider config

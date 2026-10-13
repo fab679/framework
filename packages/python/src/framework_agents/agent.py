@@ -12,8 +12,11 @@ from the FIXED versions):
   ends on a dangling tool-call tail).
 - Unknown tools / invalid args become model-visible feedback; loop continues.
 - result.usage.cost_usd set only when a price is known — never guessed.
-- Stream parity: token/thinking deltas batch per model call (as in TS), tool
-  events yield live, budget errors pass through unretried.
+- Stream parity: token/thinking deltas stream LIVE during the model call when
+  no middleware declares wrap_model/after_model; batched fallback (retry
+  compat) otherwise — tool events yield live, budget errors pass through
+  unretried. Providers stamp post-delta failures non-retryable so retries
+  never duplicate streamed text.
 - Per-stream results: AgentStream captures its OWN AgentResult at the done
   event; concurrent streams on one agent never cross-contaminate.
 - beforeModel REPLACEMENTS feed the model call only: the loop's message list
@@ -35,7 +38,7 @@ from typing import Any, AsyncIterator, Callable, Literal, Optional, Type
 from pydantic import BaseModel, ValidationError
 
 from .checkpoint import PendingCall, ThreadCheckpoint
-from .errors import AgentError
+from .errors import AgentError, get_retryable, stamp_retryable
 from .memory import InMemoryMemory, Memory
 from .middleware import (
     HITL_DECISIONS_KEY,
@@ -608,19 +611,25 @@ class Agent:
                 rt.events and rt.events.on_step and rt.events.on_step(step)
                 yield {"type": "step", "step": step}
 
-                # Token/thinking deltas batch per model call (TS parity) while the
-                # events hooks fire live inside provider.complete.
+                # Live delta streaming (parity: TS runLoop): when no middleware
+                # declares wrap_model (retrying an attempt whose deltas were
+                # already delivered would duplicate streamed text) or
+                # after_model (output scrubbing must run BEFORE tokens reach
+                # the UI), deltas stream LIVE via a queue while the model call
+                # is still running; the batched fallback buffers until it settles.
+                needs_batching = any(
+                    getattr(m, "wrap_model", None) or getattr(m, "after_model", None) for m in mw
+                )
                 pending: list[StreamEvent] = []
+                channel: asyncio.Queue = asyncio.Queue()
+                deltas_emitted = False
 
-                def on_token(delta: str) -> None:
-                    if rt.events and rt.events.on_token:
-                        rt.events.on_token(delta)
-                    pending.append({"type": "token", "delta": delta})
-
-                def on_thinking(delta: str) -> None:
-                    if rt.events and rt.events.on_thinking:
-                        rt.events.on_thinking(delta)
-                    pending.append({"type": "thinking", "delta": delta})
+                def emit_delta(kind: str, delta: str) -> None:
+                    event = {"type": kind, "delta": delta}
+                    if needs_batching:
+                        pending.append(event)
+                    else:
+                        channel.put_nowait(event)
 
                 response_format = None
                 if strategy == "provider" and fmt is not None:
@@ -632,15 +641,40 @@ class Agent:
                 ctx = HookContext(step=step, invocation_state=invocation_state)
 
                 async def _call_model(req: ModelRequest) -> Any:
-                    return await rt.model.complete(
-                        CompleteOptions(
-                            messages=req.messages,
-                            tools=req.tools,
-                            response_format=req.response_format,
-                            on_token=on_token,
-                            on_thinking=on_thinking,
+                    # One closure per attempt (the wrap chain re-invokes
+                    # _call_model on every retry): deltas buffered by a FAILED
+                    # attempt never flush — the retried call replaces them.
+                    # Live path: deltas went onto the channel and were already
+                    # delivered, so there is nothing to roll back by design.
+                    start = len(pending)
+                    failed = {"v": False}
+
+                    def attempt_on_token(delta: str) -> None:
+                        if rt.events and rt.events.on_token:
+                            rt.events.on_token(delta)
+                        if not failed["v"]:
+                            emit_delta("token", delta)
+
+                    def attempt_on_thinking(delta: str) -> None:
+                        if rt.events and rt.events.on_thinking:
+                            rt.events.on_thinking(delta)
+                        if not failed["v"]:
+                            emit_delta("thinking", delta)
+
+                    try:
+                        return await rt.model.complete(
+                            CompleteOptions(
+                                messages=req.messages,
+                                tools=req.tools,
+                                response_format=req.response_format,
+                                on_token=attempt_on_token,
+                                on_thinking=attempt_on_thinking,
+                            )
                         )
-                    )
+                    except BaseException:
+                        failed["v"] = True
+                        del pending[start:]
+                        raise
 
                 request = ModelRequest(
                     messages=messages,
@@ -652,18 +686,61 @@ class Agent:
                 )
                 if mw:
                     request = await run_before_model(mw, request, ctx)
-                    completion = await compose_model_call(mw, _call_model, ctx)(request)
+                call = compose_model_call(mw, _call_model, ctx) if mw else _call_model
+
+                async def _call_and_close(req: ModelRequest) -> Any:
+                    # Live path: the None sentinel must arrive AFTER every
+                    # delta the attempt pushed — push it when the call settles
+                    # (success or failure).
+                    try:
+                        return await call(req)
+                    finally:
+                        channel.put_nowait(None)
+
+                try:
+                    if needs_batching:
+                        completion = await call(request)
+                        # A before_model hook may have REPLACED the message list for
+                        # this call: replacements feed the model call only; history is
+                        # preserved (TS parity). The loop's `messages` list stays
+                        # authoritative for appends and the end-of-run save — adopting
+                        # a shortened replacement here once destroyed long-term memory.
+                        for event in pending:
+                            if event.get("delta"):
+                                yield event
+                    else:
+                        # LIVE: drain the queue concurrently with the running
+                        # model call, yielding deltas as they arrive. If the
+                        # run is torn down mid-call (abort/disconnect, the
+                        # consumer walking away), the in-flight provider task
+                        # is cancelled with it — deltas it would push are
+                        # discarded by design.
+                        task = asyncio.ensure_future(_call_and_close(request))
+                        try:
+                            while True:
+                                event = await channel.get()
+                                if event is None:
+                                    break
+                                deltas_emitted = True
+                                if event.get("delta"):
+                                    yield event
+                            completion = await task
+                        finally:
+                            if not task.done():
+                                task.cancel()
+                except Exception as err:
+                    # Belt-and-braces for the batched path: nothing buffered
+                    # from failed attempts may ever flush. A LIVE-path failure
+                    # after deltas were delivered must not be retried (a retry
+                    # would duplicate streamed text) — our providers stamp
+                    # that (delivered-verdict); foreign providers without any
+                    # verdict get it stamped here.
+                    del pending[:]
+                    if deltas_emitted and get_retryable(err) is None:
+                        stamp_retryable(err, False)
+                    raise
+                if mw:
                     completion = await run_after_model(mw, completion, request, ctx)
-                else:
-                    completion = await _call_model(request)
-                # A before_model hook may have REPLACED the message list for
-                # this call: replacements feed the model call only; history is
-                # preserved (TS parity). The loop's `messages` list stays
-                # authoritative for appends and the end-of-run save — adopting
-                # a shortened replacement here once destroyed long-term memory.
-                for event in pending:
-                    if event.get("delta"):
-                        yield event
 
                 usage = usage + completion.usage
                 self._check_budgets(rt.budgets, usage, started, rt.model.id)

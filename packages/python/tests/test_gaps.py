@@ -37,6 +37,8 @@ from framework_agents import (  # noqa: E402
     assert_can_handle,
     collect_stream,
     define_tool,
+    get_retryable,
+    model_retry,
     ollama,
     supports_vision,
 )
@@ -775,3 +777,167 @@ def test_stream_sync_iteration_script_and_running_loop():
 
     kinds2 = asyncio.run(notebook_cell())
     assert "done" in kinds2
+
+
+# ---------------------------------------------------------------------------
+# Live delta streaming (Path B, TS parity): deltas stream LIVE during the
+# model call when no middleware declares wrap_model/after_model; batched
+# fallback otherwise. Deltas from FAILED attempts never leak into the stream
+# (delivered-verdict contract: our providers stamp post-delta failures
+# non-retryable so retries never duplicate streamed text).
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedStreamProvider:
+    """Runs a scripted behavior per attempt; records how many attempts ran."""
+
+    id = "scripted-stream"
+    capabilities = {"structured_output": False, "streaming": True}
+
+    def __init__(self, *behaviors: Any) -> None:
+        self._behaviors = list(behaviors)
+        self.calls = 0
+
+    async def complete(self, options: CompleteOptions) -> ModelCompletion:
+        self.calls += 1
+        behavior = self._behaviors[min(self.calls - 1, len(self._behaviors) - 1)]
+        outcome = behavior(options)
+        if asyncio.iscoroutine(outcome):
+            return await outcome
+        return outcome
+
+
+def _clean_completion(options: CompleteOptions, text: str) -> ModelCompletion:
+    options.on_token(text)
+    return ModelCompletion(
+        text=text,
+        tool_calls=[],
+        usage=TokenUsage(input_tokens=1, output_tokens=len(text)),
+    )
+
+
+async def _drain(agent) -> tuple[list[str], str | None, Any]:
+    tokens: list[str] = []
+    done_text: str | None = None
+    error: Any = None
+    try:
+        async for event in agent.stream("q"):
+            if event["type"] == "token":
+                tokens.append(event["delta"])
+            elif event["type"] == "done":
+                done_text = event.get("text")
+    except BaseException as err:  # noqa: BLE001 - the contract under test
+        error = err
+    return tokens, done_text, error
+
+
+@pytest.mark.asyncio
+async def test_first_delta_yields_while_provider_call_is_in_flight():
+    finished = [False]
+
+    def early(options: CompleteOptions) -> Any:
+        options.on_token("early")
+        return _late(options)
+
+    async def _late(options: CompleteOptions) -> ModelCompletion:
+        await asyncio.sleep(0.05)
+        options.on_token("-late")
+        finished[0] = True
+        return ModelCompletion(
+            text="early-late",
+            tool_calls=[],
+            usage=TokenUsage(input_tokens=1, output_tokens=3),
+        )
+
+    provider = _ScriptedStreamProvider(early)  # live path: no middleware
+    agent = Agent(AgentOptions(model=provider))
+    seen: list[tuple[str, bool]] = []
+    done_text: str | None = None
+    async for event in agent.stream("q"):
+        if event["type"] == "token":
+            # The flag is read AT yield time: "early" must arrive while the
+            # provider call is still running (its await has not resolved).
+            seen.append((event["delta"], finished[0]))
+        elif event["type"] == "done":
+            done_text = event.get("text")
+    assert seen == [("early", False), ("-late", True)]
+    assert done_text == "early-late"
+
+
+@pytest.mark.asyncio
+async def test_post_delta_failure_never_leaks_and_is_not_retried():
+    def attempt1(options: CompleteOptions) -> Any:
+        options.on_token("poison")
+        raise AgentError("MODEL_ERROR", "stream broke after deltas", retryable=False)
+
+    provider = _ScriptedStreamProvider(
+        attempt1,
+        lambda options: _clean_completion(options, "clean"),
+    )
+    agent = Agent(
+        AgentOptions(model=provider, middleware=[model_retry(max_retries=2, initial_delay_ms=0, jitter=False)])
+    )
+    tokens, _, error = await _drain(agent)
+    # The delivered-verdict stamps post-delta failures non-retryable: NO
+    # retry (a retry would duplicate the delivered text), nothing leaks.
+    assert isinstance(error, AgentError)
+    assert error.retryable is False
+    assert tokens == []
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_delta_failure_is_retried_and_second_attempt_streams_cleanly():
+    def attempt1(options: CompleteOptions) -> Any:
+        # BEFORE any on_token: nothing was delivered, so a retry is safe.
+        raise AgentError("MODEL_ERROR", "connection refused", retryable=True)
+
+    provider = _ScriptedStreamProvider(
+        attempt1,
+        lambda options: _clean_completion(options, "clean"),
+    )
+    agent = Agent(
+        AgentOptions(model=provider, middleware=[model_retry(max_retries=2, initial_delay_ms=0, jitter=False)])
+    )
+    tokens, done_text, error = await _drain(agent)
+    assert error is None
+    assert tokens == ["clean"]
+    assert done_text == "clean"
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_batched_deltas_of_failed_attempt_roll_back_even_when_retryable():
+    def attempt1(options: CompleteOptions) -> Any:
+        options.on_token("poison")
+        raise AgentError("MODEL_ERROR", "mid-stream reset", retryable=True)
+
+    provider = _ScriptedStreamProvider(
+        attempt1,
+        lambda options: _clean_completion(options, "clean"),
+    )
+    agent = Agent(
+        AgentOptions(model=provider, middleware=[model_retry(max_retries=2, initial_delay_ms=0, jitter=False)])
+    )
+    tokens, done_text, error = await _drain(agent)
+    assert error is None
+    # The failed attempt's buffered delta never flushes; the retried call's
+    # output replaces it.
+    assert tokens == ["clean"]
+    assert done_text == "clean"
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_live_path_failure_after_deltas_gets_stamped_non_retryable():
+    def attempt1(options: CompleteOptions) -> Any:
+        options.on_token("part")
+        raise ValueError("socket exploded")  # foreign provider: no verdict
+
+    provider = _ScriptedStreamProvider(attempt1)  # live path: no middleware
+    agent = Agent(AgentOptions(model=provider))
+    tokens, _, error = await _drain(agent)
+    # Deltas were already delivered live (by design — they cannot be
+    # unsent); the loop stamps the verdictless error non-retryable.
+    assert tokens == ["part"]
+    assert get_retryable(error) is False

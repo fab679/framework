@@ -268,7 +268,7 @@ describe("llmToolSelectorMiddleware", () => {
       model: {
         id: "main",
         complete: async (o: CompleteOptions) => {
-          offered = o.tools.map((t) => t.name);
+          offered = (o.tools ?? []).map((t) => t.name);
           return { text: "ok", toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
         },
       },

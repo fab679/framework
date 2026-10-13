@@ -129,9 +129,9 @@ export class AnthropicProvider implements ModelProvider {
       ...(thinkingBudget ? { thinking: { type: "enabled", budget_tokens: thinkingBudget } } : {}),
       ...(stream ? { stream: true } : {}),
       messages,
-      ...(options.tools.length
+      ...(options.tools?.length
         ? {
-            tools: options.tools.map((t) => ({
+            tools: (options.tools ?? []).map((t) => ({
               name: t.name,
               description: t.description,
               input_schema: t.parametersSchema ?? { type: "object" },

@@ -55,7 +55,7 @@ interface SendResult {
 
 ## Event mapping (hook internals)
 
-- `token` → the delta appends to the last `turns` entry (the assistant turn created at send time).
+- `token` → the delta appends to the last `turns` entry (the assistant turn created at send time); token deltas arrive **live during streaming**, not batched after the model call completes.
 - `thinking` → appends to `thinking`.
 - `done` (when it carries text) → **reconcile**: some providers/middleware stream no deltas and deliver the full answer only in the done event — the last turn is replaced with the final text instead of staying empty. `finalText` is also what `send` resolves with.
 - `tool_call` → appends `` `calling ${event.name}…` `` to `activity` and pushes the name into the send's `toolCalls`.

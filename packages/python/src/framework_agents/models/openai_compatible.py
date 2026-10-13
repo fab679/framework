@@ -260,6 +260,12 @@ class OpenAICompatibleProvider:
         finish_reason: str | None = None
         tool_buffers: dict[int, dict[str, str]] = {}
 
+        # Retry-verdict rule: once a delta (content/thinking/tool fragment)
+        # reached the caller, a mid-stream failure is NON-retryable (re-running
+        # would duplicate already-streamed text); before any delta, failures
+        # stay retryable (nothing was delivered).
+        delivered = False
+
         # A line can SPLIT across TCP reads: the first fragment would fail
         # json.loads and the continuation would not start with "data:" — both
         # silently dropped. Accumulate a buffer and only parse COMPLETE
@@ -307,12 +313,21 @@ class OpenAICompatibleProvider:
                     think = _thinking_of(delta)
                     if think:
                         thinking += think
+                        # Thinking deltas reach the caller like token deltas
+                        # do — the delivered verdict covers them (and tool
+                        # fragments below).
+                        delivered = True
                         options.on_thinking and options.on_thinking(think)
                     if delta.get("content"):
                         text += delta["content"]
+                        delivered = True
                         options.on_token and options.on_token(delta["content"])
                     for i, tc in enumerate(delta.get("tool_calls") or []):
                         key = tc.get("index", i)
+                        # Tool-call fragments are delivered state too: a retry
+                        # would re-issue a call mid-assembly, so treat the
+                        # attempt as spent.
+                        delivered = True
                         slot = tool_buffers.setdefault(key, {"id": "", "name": "", "args": ""})
                         if tc.get("id"):
                             slot["id"] = tc["id"]
@@ -321,6 +336,20 @@ class OpenAICompatibleProvider:
                             slot["name"] = fn["name"]
                         if fn.get("arguments"):
                             slot["args"] += fn["arguments"]
+        except Exception as err:
+            # The run's own signal fired mid-request (abort): report ABORTED,
+            # never a stream error.
+            probe = getattr(options.signal, "is_set", None)
+            if callable(probe) and probe():
+                raise AgentError("ABORTED", "Run aborted", retryable=False) from err
+            # Delivered-aware verdict: deltas already streamed => non-retryable
+            # (a retry would duplicate the delivered text); before any delta
+            # the failure stays retryable.
+            raise AgentError(
+                "MODEL_ERROR",
+                f"Stream broke mid-response{' (deltas already delivered)' if delivered else ''}: {err}",
+                retryable=not delivered,
+            ) from err
         finally:
             if watchdog is not None:
                 watchdog.cancel()
