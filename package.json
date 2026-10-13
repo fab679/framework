@@ -1,8 +1,8 @@
 {
   "name": "framework-monorepo",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Agentic platform for building with agents — TypeScript + Python monorepo",
+  "description": "Agentic platform for building with agents \u2014 TypeScript + Python monorepo",
   "type": "module",
   "packageManager": "pnpm@9.7.0",
   "engines": {
