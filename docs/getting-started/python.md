@@ -133,6 +133,26 @@ Live examples live in `examples/` — see [live examples](live-examples.md).
 - [Middleware & HITL](../guides/middleware.md)
 - [A2A & serving](../guides/a2a-serving.md)
 
+## Notebook vs script vs async code — which form to use
+
+| Where you are | Use |
+| --- | --- |
+| **Jupyter / notebook cell** | `await agent.run("hi")` directly (top-level await works in notebooks), or `agent.run_sync("hi")` for blocking one-liners |
+| **Plain script** (no event loop) | `agent.run_sync("hi")` or `asyncio.run(agent.run("hi"))` — `asyncio.run` THROWS inside notebooks |
+| **Inside `async def` code** | `await agent.run("hi")` — never call `run_sync` there |
+
+Helpers:
+
+```python
+result = agent.run_sync("hi")          # -> AgentResult
+for event in agent.stream_sync("hi"):  # -> StreamEvent dicts
+    print(event["type"])
+```
+
+`run_sync` / `stream_sync` detect the running loop: scripts get `asyncio.run`
+on the spot; notebooks execute on a private loop in a worker thread, so
+Jupyter's own loop is never nested (verified both work *from inside* a running
+loop — which is what a notebook cell is).
 
 ## "Do I have to `await` everything?"
 
