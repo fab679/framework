@@ -22,8 +22,11 @@ from the FIXED versions):
 
 from __future__ import annotations
 
+import asyncio
 import json
+import queue
 import secrets
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -408,6 +411,69 @@ class Agent:
         if result is None:  # pragma: no cover - drain always sets it
             raise AgentError("RUN_INCOMPLETE", "Stream drained without a result", retryable=False)
         return result
+
+    def run_sync(self, input_text: str, **kwargs: Any) -> AgentResult:
+        """Blocking run() for scripts AND notebooks.
+
+        - Plain script (no event loop running): asyncio.run directly.
+        - Notebook / running loop: private loop on a worker thread —
+          asyncio.run() throws inside Jupyter's loop and nested loops cannot
+          be started either.
+
+        Do NOT call from `async def` code — there, `await agent.run(...)`.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.run(input_text, **kwargs))
+
+        box: dict[str, Any] = {"result": None, "err": None}
+
+        def _worker() -> None:
+            try:
+                box["result"] = asyncio.run(self.run(input_text, **kwargs))
+            except BaseException as err:  # noqa: BLE001 - re-raised in caller
+                box["err"] = err
+
+        threading.Thread(target=_worker, daemon=True).start()
+        while box["result"] is None and box["err"] is None:
+            time.sleep(0.02)
+        if box["err"] is not None:
+            raise box["err"]
+        return box["result"]  # type: ignore[no-any-return]
+
+    def stream_sync(self, input_text: str, **kwargs: Any) -> Generator[StreamEvent, None, None]:
+        """Blocking stream() — same loop handling as run_sync. Stopping the
+        iteration early stops pulling events; the run itself completes on the
+        worker and its result lands on self._last_result."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            running = True
+        else:
+            running = False
+        q: "queue.Queue[StreamEvent | BaseException | None]" = queue.Queue()
+
+        async def _pump() -> None:
+            try:
+                async for event in self.stream(input_text, **kwargs):
+                    q.put(event)
+                q.put(None)
+            except BaseException as err:  # noqa: BLE001 - re-raised in caller
+                q.put(err)
+
+        if running:
+            threading.Thread(target=lambda: asyncio.run(_pump()), daemon=True).start()
+        else:
+            threading.Thread(target=lambda: asyncio.run(_pump()), daemon=True).start()
+
+        while True:
+            item = q.get()
+            if item is None:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
 
     def stream(
         self,

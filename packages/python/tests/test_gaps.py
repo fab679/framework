@@ -8,6 +8,7 @@ a2a_as_tool, ollama(), provider_from_env.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 import sys
@@ -720,3 +721,57 @@ async def test_provider_from_env_shape():
 
     with pytest.raises(ValueError):
         provider_from_env({"baseUrl": "https://api.acme.test/v1", "model": "m"})
+# ---------------------------------------------------------------------------
+# run_sync / stream_sync (notebook + script ergonomics)
+# ---------------------------------------------------------------------------
+
+class _OnceStub:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    id = "stub"
+    capabilities = {"structured_output": False, "streaming": False}
+
+    async def complete(self, options: CompleteOptions) -> ModelCompletion:
+        return ModelCompletion(
+            text=self.text,
+            tool_calls=[],
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+
+def test_run_sync_script_context():
+    from framework_agents import Agent, AgentOptions
+
+    agent = Agent(AgentOptions(model=_OnceStub("sync-ok")))
+    result = agent.run_sync("hi")
+    assert result.text == "sync-ok"
+
+
+def test_run_sync_inside_running_loop_notebook_context():
+    """The Jupyter pattern: run_sync is CALLED while a loop is running. It
+    must delegate to a private loop on a worker instead of raising."""
+
+    async def notebook_cell() -> AgentResult:
+        agent = Agent(AgentOptions(model=_OnceStub("notebook-ok")))
+        # This coroutine runs ON the loop — exactly what a notebook cell is.
+        return agent.run_sync("hi")
+
+    result = asyncio.run(notebook_cell())
+    assert result.text == "notebook-ok"
+
+
+def test_stream_sync_iteration_script_and_running_loop():
+    from framework_agents import Agent, AgentOptions
+
+    agent1 = Agent(AgentOptions(model=_OnceStub("e1")))
+    kinds1 = [e["type"] for e in agent1.stream_sync("hi")]
+    assert "done" in kinds1
+
+    async def notebook_cell() -> list[str]:
+        agent2 = Agent(AgentOptions(model=_OnceStub("e2")))
+        # Called ON a running loop (notebook): stream_sync must still work.
+        return [e["type"] for e in agent2.stream_sync("hi")]
+
+    kinds2 = asyncio.run(notebook_cell())
+    assert "done" in kinds2
